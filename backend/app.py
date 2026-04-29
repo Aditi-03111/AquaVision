@@ -11,6 +11,7 @@ from typing import Optional
 
 import ee
 import numpy as np
+import pickle
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -55,6 +56,21 @@ def initialize_gee():
 
 
 initialize_gee()
+
+# ─── ML Model ────────────────────────────────────────────────────────────────
+_MODEL = None
+_MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
+
+def load_model():
+    global _MODEL
+    if os.path.exists(_MODEL_PATH):
+        with open(_MODEL_PATH, "rb") as f:
+            _MODEL = pickle.load(f)
+        logger.info("ML model loaded from %s", _MODEL_PATH)
+    else:
+        logger.warning("model.pkl not found — using rule-based fallback. Run train_model.py to generate it.")
+
+load_model()
 
 # ─── FastAPI App ─────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -130,52 +146,54 @@ def compute_fai(image: ee.Image) -> ee.Image:
 
 def classify_pollution(ndwi_val: float, ndti_val: float, fai_val: float) -> dict:
     """
-    Rule-based pollution classification from index values.
-    Returns classification label, score (0-100), and contributing factors.
+    ML-based pollution classification using Random Forest.
+    Falls back to rule-based thresholds if model is not loaded.
     """
+    LABELS = ["Safe", "Moderate", "Polluted"]
+    COLORS = {"Safe": "#27ae60", "Moderate": "#f39c12", "Polluted": "#e74c3c"}
+
+    if _MODEL is not None:
+        features = np.array([[ndwi_val, ndti_val, fai_val]])
+        pred = int(_MODEL.predict(features)[0])
+        proba = _MODEL.predict_proba(features)[0]
+        label = LABELS[pred]
+        score = int(round((1 - proba[0]) * 100))  # higher = more polluted
+
+        # Derive factors from feature importances + values
+        factors = []
+        if ndwi_val < 0.1:
+            factors.append("Low water clarity (NDWI)")
+        elif ndwi_val < 0.3:
+            factors.append("Moderate water clarity (NDWI)")
+        if ndti_val > 0.1:
+            factors.append("High turbidity (NDTI)")
+        elif ndti_val > 0.0:
+            factors.append("Moderate turbidity (NDTI)")
+        if fai_val > 0.02:
+            factors.append("Algal bloom detected (FAI)")
+        elif fai_val > 0.005:
+            factors.append("Possible algal activity (FAI)")
+
+        return {"label": label, "score": min(score, 100), "color": COLORS[label], "factors": factors}
+
+    # ── Rule-based fallback ──────────────────────────────────────────────────
     score = 0
     factors = []
-
-    # NDWI contribution (water presence / clarity)
     if ndwi_val < 0.1:
-        score += 40
-        factors.append("Low water clarity (NDWI)")
+        score += 40; factors.append("Low water clarity (NDWI)")
     elif ndwi_val < 0.3:
-        score += 20
-        factors.append("Moderate water clarity (NDWI)")
-
-    # NDTI contribution (turbidity)
+        score += 20; factors.append("Moderate water clarity (NDWI)")
     if ndti_val > 0.1:
-        score += 35
-        factors.append("High turbidity (NDTI)")
+        score += 35; factors.append("High turbidity (NDTI)")
     elif ndti_val > 0.0:
-        score += 15
-        factors.append("Moderate turbidity (NDTI)")
-
-    # FAI contribution (algal blooms)
+        score += 15; factors.append("Moderate turbidity (NDTI)")
     if fai_val > 0.02:
-        score += 25
-        factors.append("Algal bloom detected (FAI)")
+        score += 25; factors.append("Algal bloom detected (FAI)")
     elif fai_val > 0.005:
-        score += 10
-        factors.append("Possible algal activity (FAI)")
+        score += 10; factors.append("Possible algal activity (FAI)")
 
-    if score >= 50:
-        label = "Polluted"
-        color = "#e74c3c"
-    elif score >= 20:
-        label = "Moderate"
-        color = "#f39c12"
-    else:
-        label = "Safe"
-        color = "#27ae60"
-
-    return {
-        "label": label,
-        "score": min(score, 100),
-        "color": color,
-        "factors": factors,
-    }
+    label = "Polluted" if score >= 50 else "Moderate" if score >= 20 else "Safe"
+    return {"label": label, "score": min(score, 100), "color": COLORS[label], "factors": factors}
 
 
 def get_date_range(days_back: int = 60):
@@ -455,7 +473,7 @@ def alerts(
     Check current pollution status and return alert level + recommended actions.
     """
     try:
-        result = analyze(lat=lat, lng=lng, buffer=buffer)
+        result = analyze(lat=lat, lng=lng, buffer=buffer, days_back=60)
         classification = result["classification"]
         indices        = result["indices"]
 
