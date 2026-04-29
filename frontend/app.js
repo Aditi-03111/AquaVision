@@ -3,8 +3,8 @@
  * Satellite water pollution detection dashboard.
  * Deployed on Vercel. Calls AquaWatch FastAPI backend on Render.
  *
- * DEMO MODE: When the backend is unreachable, the app automatically falls back
- * to realistic simulated data so the full UI can be explored locally.
+ * DEMO MODE: Simulated fallback is available only on localhost or with ?demo=1
+ * so deployed results do not look like real satellite analysis when the API is down.
  */
 
 "use strict";
@@ -12,12 +12,24 @@
 // ─── Configuration ────────────────────────────────────────────────────────────
 // Replace with your Render backend URL after deployment.
 // During local development, set to http://localhost:8000
+const IS_LOCAL_FRONTEND = ["localhost", "127.0.0.1", ""].includes(window.location.hostname);
+const DEFAULT_API_BASE_URL = IS_LOCAL_FRONTEND
+  ? "http://localhost:8000"
+  : "https://aquawatch-api.onrender.com";
 const API_BASE_URL =
   window.AQUAWATCH_API_URL ||
-  "http://localhost:8000"; // ← update after Render deploy
+  DEFAULT_API_BASE_URL;
+const DEMO_FALLBACK_ALLOWED =
+  window.AQUAWATCH_ALLOW_DEMO === true ||
+  new URLSearchParams(window.location.search).has("demo") ||
+  IS_LOCAL_FRONTEND;
 
 // ─── Demo / Mock Data ─────────────────────────────────────────────────────────
-// Used automatically when the backend is offline.
+// Used only on localhost or when the URL includes ?demo=1.
+
+function canUseDemoFallback() {
+  return DEMO_FALLBACK_ALLOWED;
+}
 
 function generateDemoAnalysis(lat, lng) {
   // Deterministic-ish variation based on coordinates
@@ -635,6 +647,7 @@ async function runAnalysis() {
       }
       data = await response.json();
     } catch (fetchErr) {
+      if (!canUseDemoFallback()) throw fetchErr;
       console.warn("Backend unavailable, using demo data:", fetchErr.message);
       data = generateDemoAnalysis(lat, lng);
     }
@@ -667,13 +680,16 @@ async function runAnalysis() {
 
     showToast(
       toastType,
-      data.classification.label + " Water Quality",
-      `Score ${data.classification.score}/100 · Confidence ${data.confidence?.score ?? "N/A"} · ${data.images_used} images`
+      `${data._demo ? "Demo: " : ""}${data.classification.label} Water Quality`,
+      `${data._demo ? "Simulated fallback · " : ""}Score ${data.classification.score}/100 · Confidence ${data.confidence?.score ?? "N/A"} · ${data.images_used} images`
     );
 
   } catch (err) {
     console.error("Analysis error:", err);
-    showToast("error", "Analysis Failed", err.message);
+    const message = canUseDemoFallback()
+      ? err.message
+      : "Live satellite API is unavailable. Deploy/start the backend, or open with ?demo=1 for clearly labelled simulated data.";
+    showToast("error", "Live Analysis Failed", message);
   } finally {
     dom.btnAnalyze.disabled = false;
     dom.mapLoading.classList.add("hidden");
@@ -684,7 +700,7 @@ function renderResultCard(data) {
   const cls = data.classification;
   const labelClass = cls.label.toLowerCase();
 
-  dom.resultLabel.textContent = cls.label;
+  dom.resultLabel.textContent = data._demo ? `Demo ${cls.label}` : cls.label;
   dom.resultLabel.className = `result-label ${labelClass}`;
   dom.resultScore.textContent = `${cls.score}/100`;
   dom.resultScore.style.color = cls.color;
@@ -732,7 +748,9 @@ function renderResultCard(data) {
     ? cls.factors.map((f) => `<span class="factor-tag">${escapeHtml(f)}</span>`).join("")
     : '<span style="font-size:0.75rem;color:var(--text-muted)">No significant factors detected</span>';
 
-  dom.resultImages.textContent = `📡 ${data.images_used} Sentinel-2 images`;
+  dom.resultImages.textContent = data._demo
+    ? `Simulated demo fallback · ${data.images_used} mock Sentinel-2 scenes`
+    : `📡 ${data.images_used} Sentinel-2 images`;
   dom.resultDates.textContent  = `📅 ${data.date_range.start} → ${data.date_range.end}`;
 
   dom.resultCard.classList.remove("hidden");
@@ -781,6 +799,7 @@ async function runTimeseries() {
       }
       data = await response.json();
     } catch (fetchErr) {
+      if (!canUseDemoFallback()) throw fetchErr;
       console.warn("Backend unavailable, using demo timeseries:", fetchErr.message);
       data = generateDemoTimeseries(lat, lng, months);
     }
@@ -789,12 +808,19 @@ async function runTimeseries() {
     renderTimeseries(data);
     dom.analysisContent.classList.remove("hidden");
 
-    showToast("success", "Time-Series Loaded", `${data.data_points} monthly points · Trend: ${data.trend}`);
+    showToast(
+      "success",
+      `${data._demo ? "Demo: " : ""}Time-Series Loaded`,
+      `${data._demo ? "Simulated fallback · " : ""}${data.data_points} monthly points · Trend: ${data.trend}`
+    );
 
   } catch (err) {
     console.error("Timeseries error:", err);
     dom.analysisEmpty.classList.remove("hidden");
-    showToast("error", "Time-Series Failed", err.message);
+    const message = canUseDemoFallback()
+      ? err.message
+      : "Live satellite API is unavailable. Deploy/start the backend, or open with ?demo=1 for clearly labelled simulated data.";
+    showToast("error", "Time-Series Failed", message);
   } finally {
     dom.btnTimeseries.disabled = false;
     dom.analysisLoading.classList.add("hidden");
@@ -984,6 +1010,7 @@ async function runAlerts() {
       }
       data = await response.json();
     } catch (fetchErr) {
+      if (!canUseDemoFallback()) throw fetchErr;
       console.warn("Backend unavailable, using demo alerts:", fetchErr.message);
       data = generateDemoAlerts(lat, lng);
     }
@@ -995,7 +1022,10 @@ async function runAlerts() {
   } catch (err) {
     console.error("Alerts error:", err);
     dom.alertsEmpty.classList.remove("hidden");
-    showToast("error", "Alert Check Failed", err.message);
+    const message = canUseDemoFallback()
+      ? err.message
+      : "Live satellite API is unavailable. Deploy/start the backend, or open with ?demo=1 for clearly labelled simulated data.";
+    showToast("error", "Alert Check Failed", message);
   } finally {
     dom.btnCheckAlerts.disabled = false;
     dom.alertsLoading.classList.add("hidden");
@@ -1184,10 +1214,11 @@ function renderCompareModal() {
     const winnerKey = a.classification.score <= b.classification.score ? "A" : "B";
     const winner = winnerKey === "A" ? a : b;
     const winnerSlot = winnerKey === "A" ? dom.slotA : dom.slotB;
+    const demoNote = a._demo || b._demo ? " This comparison uses simulated fallback data." : "";
     winnerSlot?.classList.add("is-winner");
     dom.compareWinner.innerHTML = `
       <strong>Location ${winnerKey}</strong> has the lower pollution score
-      (${winner.classification.score}/100) with ${escapeHtml(winner.anomaly?.label || "no")} anomaly signal.
+      (${winner.classification.score}/100) with ${escapeHtml(winner.anomaly?.label || "no")} anomaly signal.${demoNote}
     `;
     dom.compareWinner.classList.remove("hidden");
   } else {
@@ -1208,13 +1239,14 @@ function renderCompareSlot(el, label, data) {
   const cls = data.classification;
   const anomaly = data.anomaly;
   const impact = data.impact;
+  const demoBadge = data._demo ? '<span class="slot-demo-badge">Simulated</span>' : "";
   el.innerHTML = `
     <div class="slot-label">${label}</div>
     <div class="slot-data">
       <div class="slot-location"><i class="fa-solid fa-location-dot"></i>${data.location.lat.toFixed(4)}, ${data.location.lng.toFixed(4)}</div>
-      <span class="slot-badge ${cls.label.toLowerCase()}">${escapeHtml(cls.label)}</span>
+      <span class="slot-badge ${cls.label.toLowerCase()}">${escapeHtml(cls.label)}</span>${demoBadge}
       <div class="slot-score-big" style="color:${cls.color}">${cls.score}</div>
-      <div class="slot-score-label">Pollution score / 100</div>
+      <div class="slot-score-label">${data._demo ? "Simulated score" : "Pollution score"} / 100</div>
       <div class="slot-indices">
         <div class="slot-index"><div class="slot-index-name">NDWI</div><div class="slot-index-val">${data.indices.ndwi.toFixed(3)}</div></div>
         <div class="slot-index"><div class="slot-index-name">NDTI</div><div class="slot-index-val">${data.indices.ndti.toFixed(3)}</div></div>
@@ -1292,8 +1324,8 @@ async function checkApiHealth() {
       throw new Error(`HTTP ${response.status}`);
     }
   } catch {
-    dom.apiStatusDot.className    = "status-dot offline";
-    dom.apiStatusText.textContent = "Demo Mode";
+    dom.apiStatusDot.className = "status-dot offline";
+    dom.apiStatusText.textContent = canUseDemoFallback() ? "Demo Mode" : "API Offline";
     _apiWasOnline = false;
   }
 }

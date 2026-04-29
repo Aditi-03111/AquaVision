@@ -1447,6 +1447,18 @@ strong { font-weight: var(--fw-semibold); }
 .slot-badge.moderate { background: var(--moderate-bg); color: var(--moderate); }
 .slot-badge.polluted { background: var(--polluted-bg); color: var(--polluted); }
 
+.slot-demo-badge {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 2px 10px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: var(--fw-bold);
+  color: var(--moderate);
+  background: var(--moderate-bg);
+  border: 1px solid rgba(243,156,18,0.3);
+}
+
 .slot-score-big {
   font-size: 2.5rem;
   font-weight: var(--fw-bold);
