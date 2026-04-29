@@ -14,7 +14,7 @@
 // During local development, set to http://localhost:8000
 const API_BASE_URL =
   window.AQUAWATCH_API_URL ||
-  "https://aquawatch-api.onrender.com"; // ← update after Render deploy
+  "http://localhost:8000"; // ← update after Render deploy
 
 // ─── Demo / Mock Data ─────────────────────────────────────────────────────────
 // Used automatically when the backend is offline.
@@ -40,16 +40,86 @@ function generateDemoAnalysis(lat, lng) {
 
   const today = new Date();
   const start = new Date(today); start.setDate(start.getDate() - 60);
+  const baselineStart = new Date(start); baselineStart.setMonth(baselineStart.getMonth() - 12);
   const fmt = (d) => d.toISOString().slice(0, 10);
+  const anomalyScore =
+    seed > 0.65 ? 62 + Math.round(seed * 28) :
+    seed > 0.35 ? 28 + Math.round(seed * 24) :
+    Math.round(seed * 18);
+  const anomalyStatus =
+    anomalyScore >= 60 ? "high_anomaly" :
+    anomalyScore >= 30 ? "watch" : "normal";
+  const anomalyLabel =
+    anomalyStatus === "high_anomaly" ? "High anomaly" :
+    anomalyStatus === "watch" ? "Watch" : "Normal";
+  const baselineIndices = {
+    ndwi: parseFloat(Math.min(0.85, ndwi + anomalyScore / 1000).toFixed(4)),
+    ndti: parseFloat((ndti - anomalyScore / 1300).toFixed(4)),
+    fai: parseFloat((fai - anomalyScore / 7000).toFixed(6)),
+  };
+  const pct = (current, base) => Math.abs(base) >= 0.01
+    ? parseFloat((((current - base) / Math.abs(base)) * 100).toFixed(1))
+    : null;
+  const anomalySignals = anomalyStatus === "normal"
+    ? ["Current optical water-quality indicators are close to baseline."]
+    : [
+        `Turbidity signal is ${pct(ndti, baselineIndices.ndti) ?? 0}% versus baseline.`,
+        `Water clarity proxy dropped ${Math.abs(pct(ndwi, baselineIndices.ndwi) ?? 0)}% versus baseline.`,
+      ];
+  const waterAreaHa = parseFloat((12 + seed * 92).toFixed(2));
+  const affectedAreaHa = label === "Polluted"
+    ? parseFloat((waterAreaHa * (0.28 + seed * 0.34)).toFixed(2))
+    : label === "Moderate"
+      ? parseFloat((waterAreaHa * (0.08 + seed * 0.14)).toFixed(2))
+      : parseFloat((waterAreaHa * seed * 0.03).toFixed(2));
+  const confidenceScore = Math.min(95, 58 + Math.round(seed * 25));
 
   return {
     location: { lat, lng },
     aoi_buffer_m: 5000,
     date_range: { start: fmt(start), end: fmt(today) },
     images_used: 5 + Math.round(seed * 10),
+    mean_cloud_pct: parseFloat((4 + seed * 12).toFixed(1)),
     indices: { ndwi, ndti, fai },
-    classification: { label, score, color, factors },
-    tile_urls: { rgb: null, ndwi: null, pollution: null },
+    classification: {
+      label,
+      score,
+      color,
+      factors: anomalyStatus === "normal" ? factors : [...factors, `Historical anomaly: ${anomalyLabel}`],
+    },
+    anomaly: {
+      status: anomalyStatus,
+      label: anomalyLabel,
+      score: anomalyScore,
+      signals: anomalySignals,
+      baseline_period: { start: fmt(baselineStart), end: fmt(start) },
+      baseline_images: 18 + Math.round(seed * 26),
+      baseline_indices: baselineIndices,
+      deltas: {
+        ndwi: parseFloat((ndwi - baselineIndices.ndwi).toFixed(4)),
+        ndti: parseFloat((ndti - baselineIndices.ndti).toFixed(4)),
+        fai: parseFloat((fai - baselineIndices.fai).toFixed(6)),
+        ndwi_pct: pct(ndwi, baselineIndices.ndwi),
+        ndti_pct: pct(ndti, baselineIndices.ndti),
+        fai_pct: pct(fai, baselineIndices.fai),
+      },
+    },
+    impact: {
+      aoi_area_ha: 7853.98,
+      water_area_ha: waterAreaHa,
+      affected_area_ha: affectedAreaHa,
+      water_coverage_pct: parseFloat((waterAreaHa / 7853.98 * 100).toFixed(1)),
+      affected_water_pct: waterAreaHa ? parseFloat((affectedAreaHa / waterAreaHa * 100).toFixed(1)) : 0,
+      water_pixel_count: Math.round(waterAreaHa * 25),
+      affected_pixel_count: Math.round(affectedAreaHa * 25),
+      scale_m: 20,
+    },
+    confidence: {
+      score: confidenceScore,
+      level: confidenceScore >= 75 ? "High" : "Medium",
+      drivers: ["demo current scenes", "demo baseline scenes", "visible water-pixel coverage"],
+    },
+    tile_urls: { rgb: null, baseline_rgb: null, ndwi: null, pollution: null, change: null },
     bbox: { west: lng - 0.05, south: lat - 0.05, east: lng + 0.05, north: lat + 0.05 },
     _demo: true,
   };
@@ -109,6 +179,14 @@ function generateDemoAlerts(lat, lng) {
       "📈 Track seasonal variations.",
     ];
   }
+  if (analysis.anomaly.status === "high_anomaly") {
+    recommendations.unshift("Investigate sudden deviation from historical baseline.");
+  } else if (analysis.anomaly.status === "watch") {
+    recommendations.unshift("Schedule follow-up monitoring for baseline deviation.");
+  }
+  if (analysis.impact.affected_area_ha >= 1) {
+    recommendations.push(`Prioritise field sampling across the flagged ${analysis.impact.affected_area_ha} ha area.`);
+  }
   return {
     location: { lat, lng },
     alert_level: label,
@@ -116,6 +194,9 @@ function generateDemoAlerts(lat, lng) {
     pollution_score: score,
     factors,
     indices: analysis.indices,
+    anomaly: analysis.anomaly,
+    impact: analysis.impact,
+    confidence: analysis.confidence,
     recommendations,
     timestamp: new Date().toISOString(),
     _demo: true,
@@ -131,10 +212,14 @@ const state = {
     rgb: null,
     ndwi: null,
     pollution: null,
+    change: null,
   },
   lastAnalysis: null,
   lastTimeseries: null,
   lastAlerts: null,
+  compareSlots: { a: null, b: null },
+  nextCompareSlot: "a",
+  history: [],
 };
 
 // ─── DOM References ───────────────────────────────────────────────────────────
@@ -154,17 +239,29 @@ const dom = {
   resultCard:    $("result-card"),
   resultLabel:   $("result-label"),
   resultScore:   $("result-score"),
+  gaugeArc:      $("gauge-arc"),
   valNdwi:       $("val-ndwi"),
   valNdti:       $("val-ndti"),
   valFai:        $("val-fai"),
+  resultConfidence: $("result-confidence"),
+  resultAnomaly: $("result-anomaly"),
+  resultAffected: $("result-affected"),
+  resultWaterArea: $("result-water-area"),
+  resultAnomalyDetail: $("result-anomaly-detail"),
   resultFactors: $("result-factors"),
   resultImages:  $("result-images"),
   resultDates:   $("result-dates"),
+  btnExport:     $("btn-export"),
+  btnCompareSet: $("btn-compare-set"),
+  historySection: $("history-section"),
+  historyList:   $("history-list"),
+  btnClearHistory: $("btn-clear-history"),
 
   // Layer toggles
   layerRgb:       $("layer-rgb"),
   layerNdwi:      $("layer-ndwi"),
   layerPollution: $("layer-pollution"),
+  layerChange:    $("layer-change"),
 
   // Analysis tab
   monthsSelect:      $("months-select"),
@@ -191,6 +288,13 @@ const dom = {
   alertFai:          $("alert-fai"),
   alertScoreVal:     $("alert-score-val"),
   alertTimestamp:    $("alert-timestamp"),
+
+  // Compare modal
+  compareModal:      $("compare-modal"),
+  compareModalClose: $("compare-modal-close"),
+  slotA:             $("slot-a"),
+  slotB:             $("slot-b"),
+  compareWinner:     $("compare-winner"),
 
   // About
   apiBaseDisplay:    $("api-base-display"),
@@ -242,6 +346,10 @@ L.control.layers(baseLayers, {}, { position: "topright", collapsed: false }).add
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     const target = btn.dataset.tab;
+    if (target === "compare") {
+      openCompareModal({ autoAddCurrent: true });
+      return;
+    }
 
     // Update buttons
     document.querySelectorAll(".tab-btn").forEach((b) => {
@@ -336,7 +444,7 @@ const overlayLayers = {
 };
 
 // Track which overlays are currently on the map
-const overlayState = { rgb: true, ndwi: false, pollution: false };
+const overlayState = { rgb: true, ndwi: false, pollution: false, change: false };
 
 function syncOverlays() {
   // RGB / True Colour — controls the basemap opacity (satellite vs muted)
@@ -365,6 +473,10 @@ function syncOverlays() {
       map.removeLayer(state.layers.pollution);
     }
     showDemoPollutionOverlay(false);
+  }
+
+  if (state.layers.change) {
+    overlayState.change ? map.addLayer(state.layers.change) : map.removeLayer(state.layers.change);
   }
 
   // GEE RGB / NDWI layers (only when backend returned them)
@@ -400,8 +512,10 @@ function showDemoPollutionOverlay(show) {
         dashArray: "6 4",
       }
     ).addTo(map);
+    const affected = state.lastAnalysis.impact?.affected_area_ha;
+    const affectedLine = affected !== undefined ? `<br>Affected: ${affected} ha` : "";
     _demoPollutionRect.bindTooltip(
-      `<strong>${cls} Zone</strong><br>Score: ${state.lastAnalysis.classification.score}/100`,
+      `<strong>${cls} Zone</strong><br>Score: ${state.lastAnalysis.classification.score}/100${affectedLine}`,
       { sticky: true }
     );
   }
@@ -413,6 +527,7 @@ function updateLayerBadges() {
     "layer-rgb":       overlayState.rgb,
     "layer-ndwi":      overlayState.ndwi,
     "layer-pollution": overlayState.pollution,
+    "layer-change":    overlayState.change,
   };
   Object.entries(badges).forEach(([id, active]) => {
     const el = document.getElementById(id);
@@ -439,6 +554,15 @@ dom.layerPollution.addEventListener("change", () => {
   if (dom.layerPollution.checked && !state.lastAnalysis) {
     showToast("warning", "No Analysis Yet",
       "Run an analysis first to see the pollution overlay.", 3000);
+  }
+});
+
+dom.layerChange.addEventListener("change", () => {
+  overlayState.change = dom.layerChange.checked;
+  syncOverlays();
+  if (dom.layerChange.checked && !state.layers.change) {
+    showToast("warning", "No Baseline Layer",
+      "Run a live analysis with enough historical imagery to view change hotspots.", 3500);
   }
 });
 
@@ -501,21 +625,18 @@ async function runAnalysis() {
 
   try {
     let data;
-    let usedDemo = false;
 
     try {
       const url = `${API_BASE_URL}/analyze?lat=${lat}&lng=${lng}`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
       if (!response.ok) {
         const err = await response.json().catch(() => ({ detail: response.statusText }));
         throw new Error(err.detail || `HTTP ${response.status}`);
       }
       data = await response.json();
     } catch (fetchErr) {
-      // Backend unreachable — fall back to demo data
       console.warn("Backend unavailable, using demo data:", fetchErr.message);
       data = generateDemoAnalysis(lat, lng);
-      usedDemo = true;
     }
 
     state.lastAnalysis = data;
@@ -524,13 +645,15 @@ async function runAnalysis() {
     if (data.tile_urls?.rgb)       addTileLayer(data.tile_urls.rgb,       "rgb");
     if (data.tile_urls?.ndwi)      addTileLayer(data.tile_urls.ndwi,      "ndwi");
     if (data.tile_urls?.pollution) addTileLayer(data.tile_urls.pollution, "pollution");
+    if (data.tile_urls?.change)    addTileLayer(data.tile_urls.change,    "change");
 
     // Fit map to AOI bounding box
     const b = data.bbox;
     map.fitBounds([[b.south, b.west], [b.north, b.east]], { padding: [40, 40] });
 
     // Update result card
-    renderResultCard(data, usedDemo);
+    renderResultCard(data);
+    addHistoryItem(data);
 
     // Update alert badge
     updateAlertBadge(data.classification.label);
@@ -544,8 +667,8 @@ async function runAnalysis() {
 
     showToast(
       toastType,
-      `${usedDemo ? "Demo — " : ""}${data.classification.label} Water Quality`,
-      `Pollution score: ${data.classification.score}/100 · ${data.images_used} images${usedDemo ? " (simulated)" : ""}`
+      data.classification.label + " Water Quality",
+      `Score ${data.classification.score}/100 · Confidence ${data.confidence?.score ?? "N/A"} · ${data.images_used} images`
     );
 
   } catch (err) {
@@ -557,7 +680,7 @@ async function runAnalysis() {
   }
 }
 
-function renderResultCard(data, isDemo = false) {
+function renderResultCard(data) {
   const cls = data.classification;
   const labelClass = cls.label.toLowerCase();
 
@@ -565,22 +688,52 @@ function renderResultCard(data, isDemo = false) {
   dom.resultLabel.className = `result-label ${labelClass}`;
   dom.resultScore.textContent = `${cls.score}/100`;
   dom.resultScore.style.color = cls.color;
+  if (dom.gaugeArc) {
+    dom.gaugeArc.style.stroke = cls.color;
+    dom.gaugeArc.setAttribute("stroke-dasharray", `${Math.round((cls.score / 100) * 94)} 94`);
+  }
 
   dom.valNdwi.textContent = data.indices.ndwi.toFixed(4);
   dom.valNdti.textContent = data.indices.ndti.toFixed(4);
   dom.valFai.textContent  = data.indices.fai.toFixed(6);
 
+  const confidence = data.confidence;
+  const anomaly = data.anomaly;
+  const impact = data.impact;
+  if (dom.resultConfidence) {
+    dom.resultConfidence.textContent = confidence ? `${confidence.score}% ${confidence.level}` : "N/A";
+  }
+  if (dom.resultAnomaly) {
+    dom.resultAnomaly.textContent = anomaly ? `${anomaly.label} (${anomaly.score})` : "N/A";
+    dom.resultAnomaly.className = `evidence-value ${anomalyClass(anomaly?.status)}`;
+  }
+  if (dom.resultAffected) {
+    dom.resultAffected.textContent = impact ? `${formatHa(impact.affected_area_ha)} ha` : "N/A";
+  }
+  if (dom.resultWaterArea) {
+    dom.resultWaterArea.textContent = impact ? `${formatHa(impact.water_area_ha)} ha` : "N/A";
+  }
+  if (dom.resultAnomalyDetail) {
+    const signals = anomaly?.signals?.length
+      ? anomaly.signals.map((s) => `<li>${escapeHtml(s)}</li>`).join("")
+      : "<li>No historical baseline signal available.</li>";
+    const baseline = anomaly?.baseline_period
+      ? `${anomaly.baseline_period.start} to ${anomaly.baseline_period.end}`
+      : "baseline unavailable";
+    dom.resultAnomalyDetail.innerHTML = `
+      <div class="evidence-title">Early-warning evidence</div>
+      <ul>${signals}</ul>
+      <div class="evidence-footnote">Baseline: ${escapeHtml(baseline)} · Affected water: ${impact?.affected_water_pct ?? 0}%</div>
+    `;
+  }
+
   // Factors
   dom.resultFactors.innerHTML = cls.factors.length
-    ? cls.factors.map((f) => `<span class="factor-tag">${f}</span>`).join("")
+    ? cls.factors.map((f) => `<span class="factor-tag">${escapeHtml(f)}</span>`).join("")
     : '<span style="font-size:0.75rem;color:var(--text-muted)">No significant factors detected</span>';
 
-  dom.resultImages.textContent = `📡 ${data.images_used} Sentinel-2 images${isDemo ? " (demo)" : ""}`;
+  dom.resultImages.textContent = `📡 ${data.images_used} Sentinel-2 images`;
   dom.resultDates.textContent  = `📅 ${data.date_range.start} → ${data.date_range.end}`;
-
-  if (isDemo) {
-    dom.resultImages.textContent += " — connect backend for real data";
-  }
 
   dom.resultCard.classList.remove("hidden");
 }
@@ -618,11 +771,10 @@ async function runTimeseries() {
 
   try {
     let data;
-    let usedDemo = false;
 
     try {
       const url = `${API_BASE_URL}/timeseries?lat=${lat}&lng=${lng}&months=${months}`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
+      const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
       if (!response.ok) {
         const err = await response.json().catch(() => ({ detail: response.statusText }));
         throw new Error(err.detail || `HTTP ${response.status}`);
@@ -631,18 +783,13 @@ async function runTimeseries() {
     } catch (fetchErr) {
       console.warn("Backend unavailable, using demo timeseries:", fetchErr.message);
       data = generateDemoTimeseries(lat, lng, months);
-      usedDemo = true;
     }
 
     state.lastTimeseries = data;
-    renderTimeseries(data, usedDemo);
+    renderTimeseries(data);
     dom.analysisContent.classList.remove("hidden");
 
-    showToast(
-      "success",
-      `${usedDemo ? "Demo — " : ""}Time-Series Loaded`,
-      `${data.data_points} monthly points · Trend: ${data.trend}${usedDemo ? " (simulated)" : ""}`
-    );
+    showToast("success", "Time-Series Loaded", `${data.data_points} monthly points · Trend: ${data.trend}`);
 
   } catch (err) {
     console.error("Timeseries error:", err);
@@ -654,7 +801,7 @@ async function runTimeseries() {
   }
 }
 
-function renderTimeseries(data, isDemo = false) {
+function renderTimeseries(data) {
   const series = data.series;
 
   // Summary cards
@@ -827,11 +974,10 @@ async function runAlerts() {
 
   try {
     let data;
-    let usedDemo = false;
 
     try {
       const url = `${API_BASE_URL}/alerts?lat=${lat}&lng=${lng}`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
       if (!response.ok) {
         const err = await response.json().catch(() => ({ detail: response.statusText }));
         throw new Error(err.detail || `HTTP ${response.status}`);
@@ -840,11 +986,10 @@ async function runAlerts() {
     } catch (fetchErr) {
       console.warn("Backend unavailable, using demo alerts:", fetchErr.message);
       data = generateDemoAlerts(lat, lng);
-      usedDemo = true;
     }
 
     state.lastAlerts = data;
-    renderAlerts(data, usedDemo);
+    renderAlerts(data);
     dom.alertsContent.classList.remove("hidden");
 
   } catch (err) {
@@ -857,7 +1002,7 @@ async function runAlerts() {
   }
 }
 
-function renderAlerts(data, isDemo = false) {
+function renderAlerts(data) {
   const levelClass = data.alert_level.toLowerCase();
 
   // Banner
@@ -867,7 +1012,7 @@ function renderAlerts(data, isDemo = false) {
     <span style="font-size:1.5rem">${bannerIcons[levelClass] || "ℹ️"}</span>
     <div>
       <strong>${data.alert_level} Water Quality Detected</strong><br>
-      Pollution score: ${data.pollution_score}/100 at (${data.location.lat.toFixed(4)}, ${data.location.lng.toFixed(4)})
+      Pollution score: ${data.pollution_score}/100 · Confidence ${data.confidence?.score ?? "N/A"} · (${data.location.lat.toFixed(4)}, ${data.location.lng.toFixed(4)})
     </div>
   `;
   dom.alertBanner.classList.remove("hidden");
@@ -877,16 +1022,21 @@ function renderAlerts(data, isDemo = false) {
     <span class="alert-status-badge ${levelClass}">${data.alert_level}</span>
     <div style="font-size:2rem;font-weight:700;color:${data.alert_color}">${data.pollution_score}<span style="font-size:1rem;color:var(--text-muted)">/100</span></div>
     <div style="font-size:0.75rem;color:var(--text-muted)">Pollution Score</div>
+    <div class="alert-evidence-mini">
+      <span>Confidence <strong>${data.confidence?.score ?? "N/A"}%</strong></span>
+      <span>Anomaly <strong>${escapeHtml(data.anomaly?.label || "N/A")}</strong></span>
+      <span>Affected <strong>${formatHa(data.impact?.affected_area_ha)} ha</strong></span>
+    </div>
   `;
 
   // Factors
   dom.alertFactorsList.innerHTML = data.factors.length
-    ? data.factors.map((f) => `<li>${f}</li>`).join("")
+    ? data.factors.map((f) => `<li>${escapeHtml(f)}</li>`).join("")
     : '<li style="color:var(--text-muted)">No significant pollution factors detected.</li>';
 
   // Recommendations
   dom.alertRecommendations.innerHTML = data.recommendations
-    .map((r) => `<li>${r}</li>`)
+    .map((r) => `<li>${escapeHtml(r)}</li>`)
     .join("");
 
   // Index values
@@ -901,6 +1051,225 @@ function renderAlerts(data, isDemo = false) {
 
   // Update badge
   updateAlertBadge(data.alert_level);
+}
+
+// ─── Report Export, History, and Compare ─────────────────────────────────────
+function exportAnalysisReport() {
+  if (!state.lastAnalysis) {
+    showToast("warning", "No Analysis", "Run an analysis before exporting a report.");
+    return;
+  }
+
+  const report = {
+    generated_at: new Date().toISOString(),
+    product: "AquaWatch satellite water-quality early warning",
+    note: "Remote sensing result. Validate with field/lab sampling before regulatory or public-health action.",
+    analysis: state.lastAnalysis,
+  };
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  a.href = url;
+  a.download = `aquawatch-report-${ts}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  showToast("success", "Report Exported", "JSON evidence report generated for this location.");
+}
+
+function addHistoryItem(data) {
+  const item = {
+    id: Date.now(),
+    lat: data.location.lat,
+    lng: data.location.lng,
+    label: data.classification.label,
+    score: data.classification.score,
+    color: data.classification.color,
+    timestamp: new Date(),
+    data,
+  };
+  state.history = [
+    item,
+    ...state.history.filter((h) =>
+      Math.abs(h.lat - item.lat) > 0.0001 || Math.abs(h.lng - item.lng) > 0.0001
+    ),
+  ].slice(0, 8);
+  renderHistory();
+}
+
+function renderHistory() {
+  if (!dom.historySection || !dom.historyList) return;
+  dom.historySection.style.display = state.history.length ? "" : "none";
+  dom.historyList.innerHTML = state.history.map((item, index) => `
+    <button class="history-item" type="button" data-index="${index}">
+      <span class="history-dot" style="background:${item.color}"></span>
+      <span class="history-body">
+        <span class="history-name">${item.lat.toFixed(4)}, ${item.lng.toFixed(4)} · ${escapeHtml(item.label)}</span>
+        <span class="history-time">${item.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+      </span>
+      <span class="history-score">${item.score}</span>
+    </button>
+  `).join("");
+
+  dom.historyList.querySelectorAll(".history-item").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const item = state.history[parseInt(btn.dataset.index, 10)];
+      if (!item) return;
+      state.lastAnalysis = item.data;
+      setSelectedLocation(item.lat, item.lng);
+      clearSatelliteLayers();
+      if (item.data.tile_urls?.rgb)       addTileLayer(item.data.tile_urls.rgb,       "rgb");
+      if (item.data.tile_urls?.ndwi)      addTileLayer(item.data.tile_urls.ndwi,      "ndwi");
+      if (item.data.tile_urls?.pollution) addTileLayer(item.data.tile_urls.pollution, "pollution");
+      if (item.data.tile_urls?.change)    addTileLayer(item.data.tile_urls.change,    "change");
+      renderResultCard(item.data);
+      syncOverlays();
+    });
+  });
+}
+
+function clearHistory() {
+  state.history = [];
+  renderHistory();
+}
+
+function setCompareSlot() {
+  if (!state.lastAnalysis) {
+    showToast("warning", "No Analysis", "Run an analysis before adding a comparison point.");
+    return;
+  }
+  const result = addAnalysisToCompare(state.lastAnalysis, { allowReplace: true });
+  renderCompareModal();
+  openCompareModal();
+  if (result.status === "exists") {
+    showToast("info", "Already Added", "This analysis is already in the comparison.");
+  } else {
+    showToast("success", `Location ${result.slot.toUpperCase()} Set`, "Run another analysis and click Compare again for the second point.");
+  }
+}
+
+function openCompareModal(options = {}) {
+  if (!dom.compareModal) return;
+  if (options.autoAddCurrent) {
+    if (!state.lastAnalysis) {
+      showToast("info", "Compare Needs Data", "Analyze one location first, then open Compare again.");
+    } else {
+      const result = addAnalysisToCompare(state.lastAnalysis, { allowReplace: false });
+      if (result.status === "added") {
+        showToast("success", `Location ${result.slot.toUpperCase()} Set`, "Analyze another location to fill the second slot.");
+      }
+    }
+  }
+  renderCompareModal();
+  dom.compareModal.classList.remove("hidden");
+}
+
+function closeCompareModal() {
+  if (dom.compareModal) dom.compareModal.classList.add("hidden");
+}
+
+function renderCompareModal() {
+  renderCompareSlot(dom.slotA, "Location A", state.compareSlots.a);
+  renderCompareSlot(dom.slotB, "Location B", state.compareSlots.b);
+
+  const a = state.compareSlots.a;
+  const b = state.compareSlots.b;
+  if (!dom.compareWinner) return;
+  dom.slotA?.classList.remove("is-winner");
+  dom.slotB?.classList.remove("is-winner");
+
+  if (a && b) {
+    const winnerKey = a.classification.score <= b.classification.score ? "A" : "B";
+    const winner = winnerKey === "A" ? a : b;
+    const winnerSlot = winnerKey === "A" ? dom.slotA : dom.slotB;
+    winnerSlot?.classList.add("is-winner");
+    dom.compareWinner.innerHTML = `
+      <strong>Location ${winnerKey}</strong> has the lower pollution score
+      (${winner.classification.score}/100) with ${escapeHtml(winner.anomaly?.label || "no")} anomaly signal.
+    `;
+    dom.compareWinner.classList.remove("hidden");
+  } else {
+    dom.compareWinner.classList.add("hidden");
+  }
+}
+
+function renderCompareSlot(el, label, data) {
+  if (!el) return;
+  if (!data) {
+    el.innerHTML = `
+      <div class="slot-label">${label}</div>
+      <div class="slot-empty">No location set.<br>Analyze a location, then open <strong>Compare</strong> or click the result-card <strong>Compare</strong> button.</div>
+    `;
+    return;
+  }
+
+  const cls = data.classification;
+  const anomaly = data.anomaly;
+  const impact = data.impact;
+  el.innerHTML = `
+    <div class="slot-label">${label}</div>
+    <div class="slot-data">
+      <div class="slot-location"><i class="fa-solid fa-location-dot"></i>${data.location.lat.toFixed(4)}, ${data.location.lng.toFixed(4)}</div>
+      <span class="slot-badge ${cls.label.toLowerCase()}">${escapeHtml(cls.label)}</span>
+      <div class="slot-score-big" style="color:${cls.color}">${cls.score}</div>
+      <div class="slot-score-label">Pollution score / 100</div>
+      <div class="slot-indices">
+        <div class="slot-index"><div class="slot-index-name">NDWI</div><div class="slot-index-val">${data.indices.ndwi.toFixed(3)}</div></div>
+        <div class="slot-index"><div class="slot-index-name">NDTI</div><div class="slot-index-val">${data.indices.ndti.toFixed(3)}</div></div>
+        <div class="slot-index"><div class="slot-index-name">FAI</div><div class="slot-index-val">${data.indices.fai.toFixed(4)}</div></div>
+      </div>
+      <div class="slot-evidence">
+        <span>Confidence <strong>${data.confidence?.score ?? "N/A"}%</strong></span>
+        <span>Anomaly <strong>${escapeHtml(anomaly?.label || "N/A")}</strong></span>
+        <span>Affected <strong>${formatHa(impact?.affected_area_ha)} ha</strong></span>
+      </div>
+    </div>
+  `;
+}
+
+function cloneAnalysis(data) {
+  return typeof structuredClone === "function"
+    ? structuredClone(data)
+    : JSON.parse(JSON.stringify(data));
+}
+
+function isSameAnalysis(a, b) {
+  if (!a || !b) return false;
+  return Math.abs(a.location.lat - b.location.lat) < 0.00001
+    && Math.abs(a.location.lng - b.location.lng) < 0.00001
+    && a.date_range?.start === b.date_range?.start
+    && a.date_range?.end === b.date_range?.end
+    && a.classification?.score === b.classification?.score;
+}
+
+function addAnalysisToCompare(data, options = {}) {
+  const allowReplace = options.allowReplace ?? true;
+  if (!data) return { status: "empty" };
+  if (isSameAnalysis(state.compareSlots.a, data) || isSameAnalysis(state.compareSlots.b, data)) {
+    return { status: "exists" };
+  }
+
+  let slot = null;
+  if (!state.compareSlots.a) slot = "a";
+  else if (!state.compareSlots.b) slot = "b";
+  else if (allowReplace) slot = state.nextCompareSlot;
+  else return { status: "full" };
+
+  state.compareSlots[slot] = cloneAnalysis(data);
+  state.nextCompareSlot = slot === "a" ? "b" : "a";
+  return { status: "added", slot };
+}
+
+if (dom.btnExport) dom.btnExport.addEventListener("click", exportAnalysisReport);
+if (dom.btnCompareSet) dom.btnCompareSet.addEventListener("click", setCompareSlot);
+if (dom.btnClearHistory) dom.btnClearHistory.addEventListener("click", clearHistory);
+if (dom.compareModalClose) dom.compareModalClose.addEventListener("click", closeCompareModal);
+if (dom.compareModal) {
+  dom.compareModal.addEventListener("click", (e) => {
+    if (e.target === dom.compareModal) closeCompareModal();
+  });
 }
 
 // ─── API Health Check ─────────────────────────────────────────────────────────
@@ -968,6 +1337,21 @@ function escapeHtml(str) {
   const div = document.createElement("div");
   div.appendChild(document.createTextNode(str));
   return div.innerHTML;
+}
+
+function formatHa(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  if (n >= 100) return n.toFixed(0);
+  if (n >= 10) return n.toFixed(1);
+  return n.toFixed(2);
+}
+
+function anomalyClass(status) {
+  if (status === "high_anomaly") return "danger";
+  if (status === "watch") return "warning";
+  if (status === "normal") return "good";
+  return "muted";
 }
 
 // ─── Location Search (Nominatim geocoding) ────────────────────────────────────

@@ -85,6 +85,11 @@
               <span class="toggle-track"></span>
               <span>Pollution Overlay</span>
             </label>
+            <label class="toggle-label">
+              <input type="checkbox" id="layer-change"       aria-label="Historical change hotspot layer" />
+              <span class="toggle-track"></span>
+              <span>Change Hotspots</span>
+            </label>
           </div>
         </div>
 
@@ -133,6 +138,25 @@
               <span id="val-fai" class="index-val">—</span>
             </div>
           </div>
+          <div class="result-evidence-grid" aria-label="Early warning evidence summary">
+            <div class="evidence-metric">
+              <span class="evidence-label">Confidence</span>
+              <strong id="result-confidence" class="evidence-value">—</strong>
+            </div>
+            <div class="evidence-metric">
+              <span class="evidence-label">Anomaly</span>
+              <strong id="result-anomaly" class="evidence-value">—</strong>
+            </div>
+            <div class="evidence-metric">
+              <span class="evidence-label">Affected</span>
+              <strong id="result-affected" class="evidence-value">—</strong>
+            </div>
+            <div class="evidence-metric">
+              <span class="evidence-label">Water Area</span>
+              <strong id="result-water-area" class="evidence-value">—</strong>
+            </div>
+          </div>
+          <div id="result-anomaly-detail" class="result-anomaly-detail"></div>
           <div id="result-factors" class="result-factors"></div>
           <div class="result-meta">
             <span id="result-images" class="meta-item"></span>
@@ -367,6 +391,7 @@
             <li><strong>NDWI</strong> — Normalised Difference Water Index (McFeeters 1996): detects water presence and clarity.</li>
             <li><strong>NDTI</strong> — Normalised Difference Turbidity Index: measures suspended sediment and turbidity.</li>
             <li><strong>FAI</strong> — Floating Algae Index: detects algal blooms and surface scum.</li>
+            <li><strong>Baseline anomaly</strong> — compares current indicators with historical Sentinel-2 conditions for early warning.</li>
           </ul>
         </div>
         <div class="about-card">
@@ -404,7 +429,7 @@
         <h3>API Endpoints</h3>
         <div class="api-table">
           <div class="api-row api-header"><span>Endpoint</span><span>Description</span></div>
-          <div class="api-row"><code>GET /analyze?lat=&amp;lng=</code><span>Analyse water quality at a point</span></div>
+          <div class="api-row"><code>GET /analyze?lat=&amp;lng=</code><span>Analyse water quality, anomaly, affected area, and confidence</span></div>
           <div class="api-row"><code>GET /timeseries?lat=&amp;lng=&amp;months=</code><span>Monthly historical time-series</span></div>
           <div class="api-row"><code>GET /alerts?lat=&amp;lng=</code><span>Current alert level + recommendations</span></div>
           <div class="api-row"><code>GET /health</code><span>API health check</span></div>
